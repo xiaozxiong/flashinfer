@@ -27,6 +27,7 @@
 #ifdef FP16_QK_REDUCTION_SUPPORTED
 #include "../fp16.h"
 #endif
+// hopper
 #include "../frag_layout_swizzle.cuh"
 #include "../math.cuh"
 #include "../mma.cuh"
@@ -34,9 +35,10 @@
 #include "../permuted_smem.cuh"
 #include "../pos_enc.cuh"
 #include "../utils.cuh"
+//
 #include "cascade.cuh"
-#include "mask.cuh"
-#include "variants.cuh"
+#include "mask.cuh" // mask types
+#include "variants.cuh" // DefaultAttention
 namespace flashinfer {
 
 DEFINE_HAS_MEMBER(maybe_q_rope_offset)
@@ -774,11 +776,14 @@ __device__ __forceinline__ void logits_mask(
                                                                     2 * (lane_idx % 4) +
                                                                     8 * (reg_id / 4) + reg_id % 2;
         const uint32_t qo_head_idx = kv_head_idx * group_size + r[mma_q][(reg_id % 4) / 2];
+
         const bool mask =
             (!(MASK_MODE == MaskMode::kCausal
                    ? (kv_idx + qo_len > kv_len + q_idx || (kv_idx >= chunk_end))
                    : kv_idx >= chunk_end)) &&
+            //* attention variant, default variant is in variants.cuh
             variant.LogitsMask(params, batch_idx, q_idx, kv_idx, qo_head_idx, kv_head_idx);
+        //* apply mask
         s_frag[mma_q][mma_kv][reg_id] =
             (mask) ? s_frag[mma_q][mma_kv][reg_id] : (KTraits::MaskFillValue);
       }
@@ -1945,7 +1950,7 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
     using DTypeO = typename Params::DTypeO;
     using IdType = typename Params::IdType;
     using DTypeQKAccum = typename KTraits::DTypeQKAccum;
-    using AttentionVariant = typename KTraits::AttentionVariant;
+    using AttentionVariant = typename KTraits::AttentionVariant; //*
     [[maybe_unused]] constexpr uint32_t NUM_MMA_Q = KTraits::NUM_MMA_Q;
     [[maybe_unused]] constexpr uint32_t NUM_MMA_KV = KTraits::NUM_MMA_KV;
     [[maybe_unused]] constexpr uint32_t NUM_MMA_D_QK = KTraits::NUM_MMA_D_QK;
@@ -1993,7 +1998,9 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
     const uint32_t request_idx = request_indices[bx], qo_tile_idx = qo_tile_indices[bx],
                    kv_tile_idx = kv_tile_indices[bx];
     auto smem = reinterpret_cast<uint8_t*>(&smem_storage);
+    //* define AttentionVariant
     AttentionVariant variant(params, /*batch_idx=*/request_idx, smem);
+
     const uint32_t qo_len = variant.qo_len, kv_len = variant.kv_len,
                    window_left = variant.window_left;
     const uint32_t kv_len_safe = kv_len > 0 ? kv_len : 1;
@@ -2335,6 +2342,7 @@ cudaError_t BatchPrefillWithRaggedKVCacheDispatched(Params params, typename Para
   return cudaSuccess;
 }
 
+//TODO: called in prefill.cu
 template <uint32_t CTA_TILE_Q, uint32_t HEAD_DIM_QK, uint32_t HEAD_DIM_VO,
           PosEncodingMode POS_ENCODING_MODE, bool USE_FP16_QK_REDUCTION, MaskMode MASK_MODE,
           typename AttentionVariant, typename Params>
@@ -2350,13 +2358,16 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
   constexpr uint32_t NUM_WARPS_Q = get_num_warps_q(CTA_TILE_Q);
   constexpr uint32_t NUM_WARPS_KV = get_num_warps_kv(CTA_TILE_Q);
 
+  printf("\033[93m#Review: call BatchPrefillWithPagedKVCacheDispatched() \n\033[0m");
+  printf("\033[93m#Review: padded_batch_size = %d, num_qo_heads = %d, num_kv_heads = %d, NUM_MMA_Q = %d, NUM_WARPS_Q = %d, NUM_WARPS_KV = %d\n\033[0m", padded_batch_size, num_qo_heads, num_kv_heads, NUM_MMA_Q, NUM_WARPS_Q, NUM_WARPS_KV);
+
   if (padded_batch_size == 0) {
     // No request, skip
     // this won't happen in CUDAGraph mode because we fixed the padded_batch_size
     return cudaSuccess;
   }
 
-  dim3 nblks(padded_batch_size, 1, num_kv_heads);
+  dim3 nblks(padded_batch_size, 1, num_kv_heads); // blocks = batch_size * num_kv_heads
   dim3 nthrs(32, NUM_WARPS_Q, NUM_WARPS_KV);
 
   constexpr uint32_t NUM_MMA_D_QK = HEAD_DIM_QK / 16;
@@ -2367,16 +2378,19 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
 
   int dev_id = 0;
   FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
+  //TODO: allocate resource of SM
+  // retrieves the maximum amount of shared memory per SM
   int max_smem_per_sm = 0;
   FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&max_smem_per_sm,
                                               cudaDevAttrMaxSharedMemoryPerMultiprocessor, dev_id));
+  // schedule blocks on SM by SMEM resource
   // we expect each sm execute two threadblocks
   const int num_ctas_per_sm =
       max_smem_per_sm >= 2 * (CTA_TILE_Q * HEAD_DIM_QK * sizeof(DTypeQ) +
                               (HEAD_DIM_QK + HEAD_DIM_VO) * 16 * NUM_WARPS_KV * sizeof(DTypeKV))
           ? 2
           : 1;
-  const int max_smem_per_threadblock = max_smem_per_sm / num_ctas_per_sm;
+  const int max_smem_per_threadblock = max_smem_per_sm / num_ctas_per_sm; // 1 or 2
 
   const uint32_t max_num_mma_kv_reg =
       (HEAD_DIM_VO >= 128 && NUM_MMA_Q == 2 && POS_ENCODING_MODE == PosEncodingMode::kRoPELlama &&
@@ -2388,6 +2402,7 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
       ((HEAD_DIM_QK + HEAD_DIM_VO) * 16 * NUM_WARPS_KV * sizeof(DTypeKV));
 
   DISPATCH_NUM_MMA_KV(min(max_num_mma_kv_smem, max_num_mma_kv_reg), NUM_MMA_KV, {
+    //* define an alias template for a specialized instantiation
     using KTraits =
         KernelTraits<MASK_MODE, CTA_TILE_Q, NUM_MMA_Q, NUM_MMA_KV, NUM_MMA_D_QK, NUM_MMA_D_VO,
                      NUM_WARPS_Q, NUM_WARPS_KV, POS_ENCODING_MODE, DTypeQ, DTypeKV, DTypeO,
@@ -2403,17 +2418,20 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
                  " and report the issue to the developers.";
       FLASHINFER_ERROR(err_msg.str());
     } else {
+      //* set SMEM size and get kernel
       size_t smem_size = sizeof(typename KTraits::SharedStorage);
       auto kernel = BatchPrefillWithPagedKVCacheKernel<KTraits, Params>;
       FLASHINFER_CUDA_CALL(
           cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
       if (tmp_v == nullptr) {
         // do not partition kv
+        printf("\033[93m#Review: do not partition kv \n\033[0m");
         params.partition_kv = false;
         void* args[] = {(void*)&params};
         FLASHINFER_CUDA_CALL(
             cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
       } else {
+        printf("\033[93m#Review: partition kv \n\033[0m");
         params.partition_kv = true;
         auto o = params.o;
         auto lse = params.lse;
@@ -2423,6 +2441,7 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
         FLASHINFER_CUDA_CALL(
             cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
         if constexpr (AttentionVariant::use_softmax) {
+          printf("\033[93m#Review: use softmax \n\033[0m");
           FLASHINFER_CUDA_CALL(VariableLengthMergeStates(
               tmp_v, tmp_s, params.merge_indptr, o, lse, params.max_total_num_rows,
               params.total_num_rows, num_qo_heads, HEAD_DIM_VO, stream));

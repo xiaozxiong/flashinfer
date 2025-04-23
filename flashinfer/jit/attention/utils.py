@@ -17,6 +17,7 @@ limitations under the License.
 from typing import List
 
 
+# TODO: generate additional parameters in params
 def generate_additional_params(
     additional_tensor_names: List[str],
     additional_tensor_dtypes: List[str],
@@ -66,6 +67,7 @@ def generate_additional_params(
                 for var in additional_scalar_names
             ]
         )
+    #* 
     else:
         additional_params_setter = " \\\n".join(
             [

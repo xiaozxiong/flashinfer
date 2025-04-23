@@ -267,7 +267,7 @@ TORCH_LIBRARY_FRAGMENT(TORCH_EXTENSION_NAME, m) {
   m.def("single_prefill_with_kv_cache", single_prefill_with_kv_cache);
   m.def("batch_prefill_with_kv_cache_plan", BatchPrefillWithKVCachePlan);
   m.def("batch_prefill_with_ragged_kv_cache_run", BatchPrefillWithRaggedKVCacheRun);
-  m.def("batch_prefill_with_paged_kv_cache_run", BatchPrefillWithPagedKVCacheRun);
+  m.def("batch_prefill_with_paged_kv_cache_run", BatchPrefillWithPagedKVCacheRun); //* 
 
   // pod-attention
   // Temporarily disabled because we don't generate the implementation yet.

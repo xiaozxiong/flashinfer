@@ -40,6 +40,7 @@ cudaError_t BatchPrefillWithRaggedKVCacheDispatched(Params params, typename Para
 
 using namespace flashinfer;
 
+//TODO: assign PrefillPlanInfo according to input parameters
 at::Tensor BatchPrefillWithKVCachePlan(
     at::Tensor float_workspace_buffer, at::Tensor int_workspace_buffer,
     at::Tensor page_locked_int_workspace_buffer, at::Tensor qo_indptr, at::Tensor kv_indptr,
@@ -55,6 +56,7 @@ at::Tensor BatchPrefillWithKVCachePlan(
 
   const c10::cuda::OptionalCUDAGuard device_guard(float_workspace_buffer.device());
   const cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+  //* get plan_info
   cudaError_t status = PrefillPlan<IdType>(
       float_workspace_buffer.data_ptr(), float_workspace_size_in_bytes,
       int_workspace_buffer.data_ptr(), page_locked_int_workspace_buffer.data_ptr(),
@@ -194,6 +196,7 @@ void BatchPrefillWithRaggedKVCacheRun(at::Tensor float_workspace_buffer,
       });
 }
 
+//TODO: run prefill with paged KV cache
 void BatchPrefillWithPagedKVCacheRun(at::Tensor float_workspace_buffer,
                                      at::Tensor int_workspace_buffer, at::Tensor plan_info_vec,
                                      at::Tensor q, at::Tensor paged_k_cache,
@@ -202,19 +205,25 @@ void BatchPrefillWithPagedKVCacheRun(at::Tensor float_workspace_buffer,
                                      at::Tensor paged_kv_last_page_len, at::Tensor o,
                                      std::optional<at::Tensor> maybe_lse, int64_t mask_mode_code,
                                      int64_t layout, int64_t window_left ADDITIONAL_FUNC_PARAMS) {
+  
+  // ADDITIONAL_FUNC_PARAMS: maybe_custom_mask, maybe_mask_indptr, maybe_alibi_slopes, logits_soft_cap, ...
+  printf("\033[93m#Review: call batch_prefill.cu/BatchPrefillWithPagedKVCacheRun()\n\033[0m");
   PrefillPlanInfo plan_info;
-  plan_info.FromVector(tensor_to_vec(plan_info_vec));
+  plan_info.FromVector(tensor_to_vec(plan_info_vec)); // assignment
+  printf("\033[93m#Review: padded_batch_size = %d, cta_tile_q = %d,\n\033[0m", plan_info.padded_batch_size, plan_info.cta_tile_q);
+
   QKVLayout kv_layout = static_cast<QKVLayout>(layout);
   auto device = q.device();
-  int64_t batch_size = paged_kv_indptr.size(0) - 1;
-  int64_t num_qo_heads = q.size(1);
+  int64_t batch_size = paged_kv_indptr.size(0) - 1; // batch size
+  int64_t num_qo_heads = q.size(1); // heads of qo
   int64_t num_kv_heads, page_size;
   uint32_t head_dim_qk = q.size(2);
   if (kv_layout == QKVLayout::kHND) {
     num_kv_heads = paged_k_cache.size(1);
     page_size = paged_k_cache.size(2);
   } else {
-    page_size = paged_k_cache.size(1);
+    // k, v: [max_num_pages, page_size, num_kv_heads, head_dim]
+    page_size = paged_k_cache.size(1); // page size
     num_kv_heads = paged_k_cache.size(2);
   }
 
@@ -244,13 +253,18 @@ void BatchPrefillWithPagedKVCacheRun(at::Tensor float_workspace_buffer,
 
   const c10::cuda::OptionalCUDAGuard device_guard(float_workspace_buffer.device());
   const cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
-
+  
+  //? where are these types?
   DISPATCH_context(
       DTypeQ, DTypeKV, DTypeO, IdType, MASK_MODE, HEAD_DIM_QK, HEAD_DIM_VO, POS_ENCODING_MODE,
       USE_SLIDING_WINDOW, USE_LOGITS_SOFT_CAP, USE_FP16_QK_REDUCTION, AttentionVariant,
       RaggedParams, PagedParams, [&] {
+        //* add in macro function
+        // constexpr auto use_custom_mask = MASK_MODE == MaskMode::kCustom;
+        // using AttentionVariant = DefaultAttention<use_custom_mask, false, false, false>;
+        //TODO: assignment
         PagedParams params;
-
+        //* data and output
         params.q = static_cast<DTypeQ*>(q.data_ptr());
         paged_kv_t<DTypeKV, IdType> paged_kv(
             num_kv_heads, page_size, HEAD_DIM_VO, batch_size, kv_layout,
@@ -265,7 +279,7 @@ void BatchPrefillWithPagedKVCacheRun(at::Tensor float_workspace_buffer,
 
         params.lse = maybe_lse ? static_cast<float*>(maybe_lse->data_ptr()) : nullptr;
         params.num_qo_heads = num_qo_heads;
-        params.group_size = uint_fastdiv(num_qo_heads / paged_kv.num_heads);
+        params.group_size = uint_fastdiv(num_qo_heads / paged_kv.num_heads); //* grouped query attention
         params.q_stride_n = q_stride_n;
         params.q_stride_h = q_stride_h;
         params.window_left = window_left;
@@ -281,8 +295,11 @@ void BatchPrefillWithPagedKVCacheRun(at::Tensor float_workspace_buffer,
         params.max_total_num_rows = 0;
         params.padded_batch_size = 0;
         params.partition_kv = false;
-
+        
         ADDITIONAL_PARAMS_SETTER
+        // assignment of params.maybe_custom_mask and other params
+        // params.maybe_custom_mask = maybe_custom_mask ? static_cast<uint8_t*>(maybe_custom_mask->data_ptr()): nullptr;
+        // params.maybe_mask_indptr = maybe_mask_indptr ? static_cast<int32_t*>(maybe_mask_indptr->data_ptr()): nullptr;
 
         DTypeO* tmp_v = nullptr;
         float* tmp_s = nullptr;
@@ -314,8 +331,9 @@ void BatchPrefillWithPagedKVCacheRun(at::Tensor float_workspace_buffer,
         }
 
         cudaError_t status = cudaSuccess;
-
+        printf("\033[93m#Review: cta_tile_q = %d\n\033[0m", plan_info.cta_tile_q);
         DISPATCH_CTA_TILE_Q(plan_info.cta_tile_q, CTA_TILE_Q, {
+          //* 
           status = flashinfer::BatchPrefillWithPagedKVCacheDispatched<
               CTA_TILE_Q, HEAD_DIM_QK, HEAD_DIM_VO, POS_ENCODING_MODE,
               /*use_fp16_qk_reduction=*/USE_FP16_QK_REDUCTION, MASK_MODE, AttentionVariant,

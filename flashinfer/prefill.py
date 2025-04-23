@@ -163,7 +163,7 @@ def get_single_prefill_module(backend):
 
     return backend_module
 
-
+# TODO: called for batch prefill with paged kv
 def get_batch_prefill_module(backend):
     def backend_module(*args):
         global _batch_prefill_modules, _batch_prefill_sm90_modules
@@ -174,14 +174,13 @@ def get_batch_prefill_module(backend):
             uri = get_batch_prefill_uri(backend, *args)
             if has_prebuilt_ops and uri in prebuilt_ops_uri:
                 if backend == "fa2":
-                    _kernels = torch.ops.flashinfer_kernels
-
+                    _kernels = torch.ops.flashinfer_kernels # flashinfer_kernels is extension name
                     plan_func = _kernels.batch_prefill_with_kv_cache_plan.default
                     ragged_run_func = (
                         _kernels.batch_prefill_with_ragged_kv_cache_run.default
                     )
                     paged_run_func = (
-                        _kernels.batch_prefill_with_paged_kv_cache_run.default
+                        _kernels.batch_prefill_with_paged_kv_cache_run.default # default means the default implementation?
                     )
                 else:
                     _kernels_sm90 = torch.ops.flashinfer_kernels_sm90
@@ -196,10 +195,14 @@ def get_batch_prefill_module(backend):
                         _kernels_sm90.batch_prefill_with_paged_kv_cache_sm90_run.default
                     )
             else:
+                #TODO: JIT
+                #* JIT, compile and load
                 module = gen_batch_prefill_module(backend, *args)
+                #* use module of JIT
                 plan_func = module.plan.default
                 ragged_run_func = module.ragged_run.default
                 paged_run_func = module.paged_run.default
+                print(f"\033[94m#Review prefill.py: paged_run_func = {paged_run_func}\033[0m")
 
             # torch library for ragged_run
 
@@ -316,6 +319,7 @@ def get_batch_prefill_module(backend):
                     "maybe_lse",
                 ),
             )
+            # TODO: wrapper.run()
             def paged_run(
                 float_workspace_buffer: torch.Tensor,
                 int_workspace_buffer: torch.Tensor,
@@ -340,6 +344,8 @@ def get_batch_prefill_module(backend):
                 rope_scale: float,
                 rope_theta: float,
             ) -> None:
+                print(f"\033[94m#Review: run prefill.py/paged_run(), backend = {backend}\033[0m")
+                print(f"\033[94m#Review: custom_mask size: {maybe_custom_mask.size()}\033[0m")
                 if backend == "fa2":
                     paged_run_func(
                         float_workspace_buffer,
@@ -365,6 +371,7 @@ def get_batch_prefill_module(backend):
                         1.0 / rope_scale,  # rope_rcp_scale
                         1.0 / rope_theta,  # rope_rcp_theta
                     )
+                    print(f"\033[94m#Review: finish paged_run_func, o size = {o.size()}\033[0m")
                 else:
                     paged_run_func(
                         float_workspace_buffer,
@@ -424,7 +431,7 @@ def get_batch_prefill_module(backend):
                 paged_run=paged_run,
             )
         return modules_dict[args]
-
+    # retuen backend_module function()
     return backend_module
 
 
@@ -1292,6 +1299,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
             )
         if packed_custom_mask is None and custom_mask is not None:
             # create packed custom mask from custom mask
+            print("\033[94m#Review: pack custom mask into bits\033[0m")
             packed_custom_mask, mask_indptr = segment_packbits(
                 custom_mask.contiguous().view(-1),
                 mask_indptr,
@@ -1309,7 +1317,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
             kv_lens_arr_host, non_blocking=non_blocking
         )
 
-        total_num_rows = qo_indptr_host[-1]
+        total_num_rows = qo_indptr_host[-1] # total number of tokens in batch
 
         if self.is_cuda_graph_enabled:
             if self._max_total_num_rows is None:
@@ -1362,6 +1370,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
                 # NOTE(Zihao): mask_indptr has the same length as qo_indptr
                 self._mask_indptr_buf.copy_(mask_indptr, non_blocking=non_blocking)
         else:
+            print(f"\033[94m#Review prefill.py: no cuda graph\033[0m")
             self._qo_indptr_buf = qo_indptr.to(self.device, non_blocking=non_blocking)
             self._paged_kv_indptr_buf = paged_kv_indptr.to(
                 self.device, non_blocking=non_blocking
@@ -1382,8 +1391,9 @@ class BatchPrefillWithPagedKVCacheWrapper:
 
         self._cached_q_data_type = q_data_type
         self._cached_kv_data_type = kv_data_type
-
+        #* use JIT module
         if self._jit_module is not None:
+            print("\033[94m#Review prefill.py: jit module\033[0m")
             self._cached_module = self._jit_module
         else:
             if self._backend == "auto":
@@ -1408,7 +1418,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
                 logits_soft_cap > 0,  # use_logits_soft_cap
                 use_fp16_qk_reduction,
             )
-
+            # TODO: compute attention with this function
             self._cached_module = get_batch_prefill_module(self._backend)(
                 *get_module_args
             )
@@ -1429,6 +1439,8 @@ class BatchPrefillWithPagedKVCacheWrapper:
                 ].copy_(vector_sparse_indptr_host, non_blocking=non_blocking)
                 paged_kv_indptr_host = vector_sparse_indptr_host
 
+        #* get plan info
+        print("\033[94m#Review prefill.py: get plan info by plan\033[0m")
         self._plan_info = self._cached_module.plan(
             self._float_workspace_buffer,
             self._int_workspace_buffer,
@@ -1664,7 +1676,8 @@ class BatchPrefillWithPagedKVCacheWrapper:
                 rope_scale,
                 rope_theta,
             ]
-
+        # print(f"arguments of paged_run: {run_args}")
+        #TODO: run with JIT module
         self._cached_module.paged_run(*run_args)
         if v_scale is not None:
             out *= v_scale

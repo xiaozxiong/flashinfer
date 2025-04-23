@@ -718,6 +718,7 @@ def gen_batch_prefill_module(
     use_logits_soft_cap: bool,
     use_fp16_qk_reduction: bool,
 ):
+    print("\033[95m#Review: JIT module, call gen_batch_prefill_module()\033[0m")
     uri = get_batch_prefill_uri(
         backend,
         dtype_q,
@@ -733,6 +734,7 @@ def gen_batch_prefill_module(
     )
 
     if backend == "fa2":
+        print("\033[95m#Review: JIT module, call gen_batch_prefill_module(), backend == fa2\033[0m")
         additional_tensor_names = [
             "maybe_custom_mask",
             "maybe_mask_indptr",
@@ -1102,6 +1104,7 @@ def gen_customize_batch_decode_module(
     )
 
 
+#TODO: generate files in .cache directory and compile them in JIT
 def gen_customize_batch_prefill_module(
     backend: str,
     uri: str,
@@ -1138,20 +1141,24 @@ def gen_customize_batch_prefill_module(
     }
     if backend == "auto":
         raise ValueError("backend should not be auto when jit_args is provided")
+    #TODO: run this
     elif backend == "fa2":
         gen_directory = FLASHINFER_GEN_SRC_DIR / uri
         (additional_params_decl, additional_func_params, additional_params_setter) = (
-            generate_additional_params(
+            generate_additional_params( # in utils.py
                 additional_tensor_names,
                 additional_tensor_dtypes,
                 additional_scalar_names,
                 additional_scalar_dtypes,
             )
         )
-
+        print(f"\033[95m#Review: additional_params_decl = {additional_params_decl}\033[0m")
+        print(f"\033[95m#Review: additional_func_params = {additional_func_params}\033[0m")
+        print(f"\033[95m#Review: additional_params_setter = {additional_params_setter}\033[0m")
+        # parameter
         with open(FLASHINFER_CSRC_DIR / "batch_prefill_customize_config.jinja") as f:
             config_templ = jinja2.Template(f.read())
-
+        # add function declarations
         with open(FLASHINFER_CSRC_DIR / "batch_prefill_paged_kernel_inst.jinja") as f:
             paged_kernel_inst_templ = jinja2.Template(f.read())
 
@@ -1159,7 +1166,7 @@ def gen_customize_batch_prefill_module(
             ragged_kernel_inst_templ = jinja2.Template(f.read())
 
         kwargs |= {
-            "additional_params_decl": additional_params_decl,
+            "additional_params_decl": additional_params_decl, # additional parameter inserted in params
             "additional_func_params": additional_func_params,
             "additional_params_setter": additional_params_setter,
         }
@@ -1202,8 +1209,10 @@ def gen_customize_batch_prefill_module(
                 source = f.read()
             write_if_different(dest_path, source)
 
+        # generate config
         generated_config_path = gen_directory / "batch_prefill_config.inc"
         write_if_different(generated_config_path, generated_inc_str)
+        # source_paths: batch_prefill_*_kernel_mask_*.cu, batch_prefill.cu + batch_prefill_jit_pybind.cu
         return load_cuda_ops(
             uri,
             source_paths,

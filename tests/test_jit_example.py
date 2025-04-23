@@ -57,6 +57,7 @@ struct SingleDecodeWithCustomMask : AttentionVariantBase {
         variant_decl,
     )
 
+    # functools.partial: pre-fill some arguments of a function
     f = functools.partial(single_decode_with_kv_cache_with_jit_module, jit_module)
 
     q = torch.randn(32, 128, dtype=torch.float16, device="cuda")
@@ -343,6 +344,7 @@ def test_batch_prefill_flash_sigmoid():
         variant_decl,
     )
 
+    # Ragged Tensor
     float_workspace_buffer = torch.empty(
         128 * 1024 * 1024, dtype=torch.uint8, device="cuda"
     )
@@ -351,7 +353,7 @@ def test_batch_prefill_flash_sigmoid():
     )
 
     batch_size = 128
-    seq_len_per_request = 1024
+    seq_len_per_request = 128 # 1024
     qo_indptr_host = torch.arange(
         0, batch_size * seq_len_per_request + 1, seq_len_per_request, dtype=torch.int32
     )
@@ -399,7 +401,7 @@ def test_batch_prefill_flash_sigmoid():
     sigmoid_bias = 0.25
 
     o = wrapper.run(q, k, v, logits_scale, sigmoid_bias)
-
+    # TODO: with PagedAttention
     wrapper_paged = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
         float_workspace_buffer, kv_layout="NHD", backend="fa2", jit_args=jit_args
     )
@@ -697,13 +699,100 @@ struct DebugPrintLogits : AttentionVariantBase {
     torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
 
 
+def test_batch_prefill_custom_mask(device: torch.device):
+    torch.manual_seed(42)
+    
+    # TODO: user-defined variant
+    variant_decl = flash_sigmoid_sm80_decl
+    # use the provided arguments to create the JIT module
+    jit_args = (
+        "batch_prefill_flash_sigmoid_sm80",  # uri
+        torch.float16,  # dtype_q
+        torch.float16,  # dtype_kv
+        torch.float16,  # dtype_o
+        torch.int32,  # idtype
+        128,  # hidden_dim_qk
+        128,  # hidden_dim_vo
+        [],  # additional_tensor_names
+        [],  # additional_tensor_dtypes
+        ["logits_scale", "sigmoid_bias"],  # additional_scalar_names
+        ["double", "double"],  # additional_scalar_dtypes
+        "FlashSigmoid",
+        variant_decl,
+    )
+
+    num_layers = 32
+    num_qo_heads = 64
+    num_kv_heads = 16
+    head_dim = 128
+    max_num_pages = 128
+    page_size = 16
+    # allocate 128MB workspace buffer
+    workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device)
+    prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+        workspace_buffer, kv_layout="NHD", backend="fa2", jit_args=jit_args
+    )
+    
+    batch_size = 7
+    nnz_qo = 100
+    qo_indptr = torch.tensor(
+        [0, 33, 44, 55, 66, 77, 88, nnz_qo], dtype=torch.int32, device=device
+    )
+    paged_kv_indices = torch.arange(max_num_pages).int().to(device=device)
+    paged_kv_indptr = torch.tensor(
+        [0, 17, 29, 44, 48, 66, 100, 128], dtype=torch.int32, device=device
+    )
+    # 1 <= paged_kv_last_page_len <= page_size
+    paged_kv_last_page_len = torch.tensor(
+        [1, 7, 14, 4, 3, 1, 16], dtype=torch.int32, device=device
+    )
+    q_at_layer = torch.randn(num_layers, nnz_qo, num_qo_heads, head_dim).half().to(device=device)
+    kv_cache_at_layer = torch.randn(
+        num_layers, max_num_pages, 2, page_size, num_kv_heads, head_dim, dtype=torch.float16, device=device
+    )
+
+    # below is another example of creating custom mask for batch prefill attention
+    mask_arr = []
+    qo_len = (qo_indptr[1:] - qo_indptr[:-1]).cpu().tolist()
+    kv_len = (page_size * (paged_kv_indptr[1:] - paged_kv_indptr[:-1] - 1) + paged_kv_last_page_len).cpu().tolist()
+    for i in range(batch_size):
+        mask_i = torch.tril(
+            torch.full((qo_len[i], kv_len[i]), True, device=device),
+            diagonal=(kv_len[i] - qo_len[i]),
+        )
+        mask_arr.append(mask_i.flatten())
+
+    mask = torch.cat(mask_arr, dim=0)
+    prefill_wrapper.plan(
+        qo_indptr,
+        paged_kv_indptr,
+        paged_kv_indices,
+        paged_kv_last_page_len,
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        page_size,
+        custom_mask=mask,
+    )
+    for i in range(num_layers):
+        q = q_at_layer[i]
+        kv_cache = kv_cache_at_layer[i]
+        # compute batch prefill attention, reuse auxiliary data structures
+        o_custom = prefill_wrapper.run(q, kv_cache)
+
+
+
 if __name__ == "__main__":
-    test_single_decode_mask()
-    test_flash_sigmoid()
-    test_dump_logits()
-    test_debug_print_logits()
-    test_sm90_debug_print_logits()
-    test_batch_decode_flash_sigmoid(False)
-    test_batch_decode_flash_sigmoid(True)
-    test_batch_prefill_flash_sigmoid()
-    test_batch_prefill_sm90_flash_sigmoid()
+    # test_single_decode_mask()
+    # test_flash_sigmoid()
+    # test_dump_logits()
+    # test_debug_print_logits()
+    # test_sm90_debug_print_logits()
+    # test_batch_decode_flash_sigmoid(False)
+    # test_batch_decode_flash_sigmoid(True)
+    # test_batch_prefill_flash_sigmoid()
+    # test_batch_prefill_sm90_flash_sigmoid()
+
+    device = torch.device("cuda:0")
+    test_batch_prefill_custom_mask(device)
+    

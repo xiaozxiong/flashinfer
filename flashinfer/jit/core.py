@@ -80,6 +80,8 @@ remove_unwanted_pytorch_nvcc_flags()
 sm90a_nvcc_flags = ["-gencode", "arch=compute_90a,code=sm_90a"]
 
 
+#TODO: JIT, compile .cu source files into a PyTorch loadable extension
+# name is the custom module name
 def load_cuda_ops(
     name: str,
     sources: List[Union[str, Path]],
@@ -89,7 +91,7 @@ def load_cuda_ops(
     extra_include_paths=None,
 ):
     verbose = os.environ.get("FLASHINFER_JIT_VERBOSE", "0") == "1"
-
+    logger.info(f"verbose: {verbose}")
     if extra_cflags is None:
         extra_cflags = []
     if extra_cuda_cflags is None:
@@ -123,6 +125,8 @@ def load_cuda_ops(
     logger.info(f"Loading JIT ops: {name}")
     check_cuda_arch()
     build_directory = FLASHINFER_JIT_DIR / name
+    # logger.info(f"JIT source files: {list(map(lambda _: str(_), sources))}")
+    logger.info(f"JIT building directory: {build_directory}")
     os.makedirs(build_directory, exist_ok=True)
     if extra_include_paths is None:
         extra_include_paths = []
@@ -132,9 +136,10 @@ def load_cuda_ops(
     ] + CUTLASS_INCLUDE_DIRS
     lock = FileLock(FLASHINFER_JIT_DIR / f"{name}.lock", thread_local=False)
     with lock:
+        # Load a PyTorch C++ extension just-in-time (JIT).
         torch_cpp_ext.load(
-            name,
-            list(map(lambda _: str(_), sources)),
+            name, # The name of the extension to build
+            list(map(lambda _: str(_), sources)), # source
             extra_cflags=cflags,
             extra_cuda_cflags=cuda_cflags,
             extra_ldflags=extra_ldflags,

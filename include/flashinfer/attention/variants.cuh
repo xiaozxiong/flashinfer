@@ -22,10 +22,12 @@
 
 #include "../math.cuh"
 #include "../utils.cuh"
-#include "variant_helper.cuh"
+#include "variant_helper.cuh" // AttentionVariantBase
 
 namespace flashinfer {
 
+//* check if a type has member named maybe_mask_indptr
+//* include/flashinfer/utils.cuh
 DEFINE_HAS_MEMBER(maybe_mask_indptr)
 
 template <bool use_custom_mask, bool use_sliding_window, bool use_logits_soft_cap, bool use_alibi>
@@ -56,7 +58,7 @@ struct DefaultAttention : AttentionVariantBase {
     }
     if constexpr (use_custom_mask) {
       if constexpr (has_maybe_mask_indptr_v<Params>) {
-        custom_mask_ptr = params.maybe_custom_mask + params.maybe_mask_indptr[batch_idx];
+        custom_mask_ptr = params.maybe_custom_mask + params.maybe_mask_indptr[batch_idx]; // mask of batch
       } else {
         custom_mask_ptr = params.maybe_custom_mask;
       }
@@ -81,7 +83,7 @@ struct DefaultAttention : AttentionVariantBase {
     bool mask = true;
     if constexpr (use_custom_mask) {
       const uint32_t offset = qo_idx * kv_len + kv_idx;
-      mask &= ((custom_mask_ptr[offset / 8] >> (offset % 8)) & 1);
+      mask &= ((custom_mask_ptr[offset / 8] >> (offset % 8)) & 1); //* load mask
     }
     if constexpr (use_sliding_window) {
       mask &= (kv_idx + qo_len + window_left >= kv_len + qo_idx);

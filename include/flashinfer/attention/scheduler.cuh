@@ -485,6 +485,7 @@ inline cudaError_t DecodePlan(void* float_buffer, size_t float_workspace_size_in
   return cudaSuccess;
 }
 
+//TODO: split
 template <typename IdType>
 inline auto PrefillSplitQOKVIndptr(IdType* qo_indptr_h, IdType* kv_indptr_h,
                                    uint32_t total_num_rows, uint32_t batch_size,
@@ -495,7 +496,7 @@ inline auto PrefillSplitQOKVIndptr(IdType* qo_indptr_h, IdType* kv_indptr_h,
   merge_indptr.push_back(0);
   o_indptr.push_back(0);
 
-  const uint32_t gqa_group_size = num_qo_heads / num_kv_heads;
+  const uint32_t gqa_group_size = num_qo_heads / num_kv_heads; // GQA
 
   // step 1: determine packed_qo_len_arr and verify qo_indptr contents.
   std::vector<int64_t> packed_qo_len_arr(batch_size), kv_len_arr(batch_size);
@@ -666,6 +667,7 @@ struct PrefillPlanInfo {
   }
 };
 
+//TODO: set plan for prefill
 template <typename IdType>
 inline cudaError_t PrefillPlan(void* float_buffer, size_t float_workspace_size_in_bytes,
                                void* int_buffer, void* page_locked_int_buffer,
@@ -689,7 +691,8 @@ inline cudaError_t PrefillPlan(void* float_buffer, size_t float_workspace_size_i
   FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, dev_id));
   int num_blocks_per_sm = 2;
   int max_grid_size = num_blocks_per_sm * num_sm;
-  uint32_t max_batch_size_if_split = max_grid_size / num_kv_heads;
+  uint32_t max_batch_size_if_split = max_grid_size / num_kv_heads; //?
+  printf("#Review PrefillPlan: max_batch_size_if_split = %d\n", max_batch_size_if_split);
 
   // step 2: determine kv_chunk_size
   auto [split_kv, new_batch_size, padded_batch_size, cta_tile_q, kv_chunk_size, request_indices_vec,
