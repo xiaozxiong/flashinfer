@@ -705,6 +705,7 @@ def gen_batch_decode_module(
     )
 
 
+#TODO: generate module wiht default variant or custom variant
 def gen_batch_prefill_module(
     backend: str,
     dtype_q: torch.dtype,
@@ -1114,10 +1115,10 @@ def gen_customize_batch_prefill_module(
     idtype: torch.dtype,
     head_dim_qk: int,
     head_dim_vo: int,
-    additional_tensor_names: List[str],
-    additional_tensor_dtypes: List[str],
-    additional_scalar_names: List[str],
-    additional_scalar_dtypes: List[str],
+    additional_tensor_names: List[str], # e.g., ['maybe_custom_mask', 'maybe_mask_indptr', 'maybe_alibi_slopes']
+    additional_tensor_dtypes: List[str], # e.g., ['uint8_t', 'int32_t', 'float']
+    additional_scalar_names: List[str], # e.g., ['logits_soft_cap', 'sm_scale', 'rope_rcp_scale', 'rope_rcp_theta']
+    additional_scalar_dtypes: List[str], # e.g., ['double', 'double', 'double', 'double']
     variant_name: str,
     variant_decl: str,
     pos_encoding_mode: int = 0,
@@ -1139,6 +1140,10 @@ def gen_customize_batch_prefill_module(
         "use_logits_soft_cap": str(use_logits_soft_cap).lower(),
         "use_fp16_qk_reduction": str(use_fp16_qk_reduction).lower(),
     }
+    print(f"\033[95m#Review: additional_tensor_names = {additional_tensor_names}\033[0m")
+    print(f"\033[95m#Review: additional_tensor_dtypes = {additional_tensor_dtypes}\033[0m")
+    print(f"\033[95m#Review: additional_scalar_names = {additional_scalar_names}\033[0m")
+    print(f"\033[95m#Review: additional_scalar_dtypes = {additional_scalar_dtypes}\033[0m")
     if backend == "auto":
         raise ValueError("backend should not be auto when jit_args is provided")
     #TODO: run this

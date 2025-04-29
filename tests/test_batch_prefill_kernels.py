@@ -579,9 +579,14 @@ def test_batch_prefill_with_paged_kv_cache_custom_mask(
     wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
         workspace_buffer, kv_layout
     )
+    # custom_mask = torch.tril(
+    #     torch.full((batch_size, qo_len, kv_len), True, device="cuda:0"),
+    #     diagonal=(kv_len - qo_len),
+    # ).reshape(-1)
+
     custom_mask = torch.tril(
-        torch.full((batch_size, qo_len, kv_len), True, device="cuda:0"),
-        diagonal=(kv_len - qo_len),
+        torch.full((batch_size, qo_len, kv_len // 2), True, device="cuda:0"),
+        diagonal=(kv_len // 2 - qo_len),
     ).reshape(-1)
     print(f"#Test: custom_mask size = {custom_mask.size()}")
 

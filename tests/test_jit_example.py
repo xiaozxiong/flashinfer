@@ -703,30 +703,60 @@ def test_batch_prefill_custom_mask(device: torch.device):
     torch.manual_seed(42)
     
     # TODO: user-defined variant
-    variant_decl = flash_sigmoid_sm80_decl
-    # use the provided arguments to create the JIT module
-    jit_args = (
-        "batch_prefill_flash_sigmoid_sm80",  # uri
-        torch.float16,  # dtype_q
-        torch.float16,  # dtype_kv
-        torch.float16,  # dtype_o
-        torch.int32,  # idtype
-        128,  # hidden_dim_qk
-        128,  # hidden_dim_vo
-        [],  # additional_tensor_names
-        [],  # additional_tensor_dtypes
-        ["logits_scale", "sigmoid_bias"],  # additional_scalar_names
-        ["double", "double"],  # additional_scalar_dtypes
-        "FlashSigmoid",
-        variant_decl,
-    )
+    variant_decl = r"""
+struct FlashCustomMask : AttentionVariantBase {
+  static constexpr bool use_softmax = true;
 
-    num_layers = 32
+  uint8_t* custom_mask_ptr;
+  uint32_t qo_len, kv_len;
+  float sm_scale_log2; //*
+  uint32_t window_left; //*
+
+  // Create closure
+  template <typename Params>
+  __device__ __host__ FlashCustomMask(const Params& params, uint32_t batch_idx,
+                                   uint8_t* smem_ptr) {
+    qo_len = params.get_qo_len(batch_idx);
+    kv_len = params.get_kv_len(batch_idx);
+    custom_mask_ptr = params.maybe_custom_mask + params.maybe_mask_indptr[batch_idx];
+    sm_scale_log2 = math::log2e;
+  }
+
+  REGISTER_LOGITS_MASK(params, batch_idx, qo_idx, kv_idx, qo_head_idx, kv_head_idx, {
+    bool mask = true;
+
+    const uint32_t offset = qo_idx * kv_len + kv_idx;
+    mask &= ((custom_mask_ptr[offset / 8] >> (offset % 8)) & 1); //* load mask
+    
+    return mask;
+  })
+};
+"""
+    num_layers = 2
     num_qo_heads = 64
     num_kv_heads = 16
     head_dim = 128
     max_num_pages = 128
     page_size = 16
+
+    # use the provided arguments to create the JIT module
+    jit_args = (
+        "batch_prefill_flash_custom_mask",  # uri
+        torch.float16,  # dtype_q
+        torch.float16,  # dtype_kv
+        torch.float16,  # dtype_o
+        torch.int32,  # idtype
+        head_dim,  # hidden_dim_qk
+        head_dim,  # hidden_dim_vo
+        ['maybe_custom_mask', 'maybe_mask_indptr'],  # additional_tensor_names, e.g., ['maybe_custom_mask', 'maybe_mask_indptr', 'maybe_alibi_slopes']
+        ['uint8_t', 'int32_t'],  # additional_tensor_dtypes
+        [],  # additional_scalar_names,
+        [],  # additional_scalar_dtypes
+        "FlashCustomMask",
+        variant_decl,
+    )
+
+   
     # allocate 128MB workspace buffer
     workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device)
     prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
@@ -774,11 +804,14 @@ def test_batch_prefill_custom_mask(device: torch.device):
         page_size,
         custom_mask=mask,
     )
+    
     for i in range(num_layers):
         q = q_at_layer[i]
         kv_cache = kv_cache_at_layer[i]
         # compute batch prefill attention, reuse auxiliary data structures
-        o_custom = prefill_wrapper.run(q, kv_cache)
+        # o_custom = prefill_wrapper.run(q, kv_cache)
+        o_custom = prefill_wrapper.run(q, kv_cache, prefill_wrapper._custom_mask_buf, prefill_wrapper._mask_indptr_buf)
+        print(o_custom.size())
 
 
 

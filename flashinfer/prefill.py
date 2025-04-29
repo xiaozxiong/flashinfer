@@ -344,8 +344,8 @@ def get_batch_prefill_module(backend):
                 rope_scale: float,
                 rope_theta: float,
             ) -> None:
-                print(f"\033[94m#Review: run prefill.py/paged_run(), backend = {backend}\033[0m")
-                print(f"\033[94m#Review: custom_mask size: {maybe_custom_mask.size()}\033[0m")
+                # print(f"\033[94m#Review: run prefill.py/paged_run(), backend = {backend}\033[0m")
+                # print(f"\033[94m#Review: custom_mask size: {maybe_custom_mask.size()}\033[0m")
                 if backend == "fa2":
                     paged_run_func(
                         float_workspace_buffer,
@@ -889,6 +889,22 @@ def _compute_page_mask_indptr(
     )
     return mask_indptr
 
+def _compute_custom_mask_indptr(
+    qo_indptr: torch.Tensor,
+    tree_lens: torch.Tensor,
+) -> torch.Tensor:
+    if len(qo_indptr) != len(tree_lens + 1):
+        raise ValueError(
+            "The length of qo_indptr should be length of tree_lens plus 1."
+        )
+    mask_indptr = torch.empty_like(qo_indptr)
+    mask_indptr[0] = 0
+    mask_indptr[1:] = torch.cumsum(
+        (qo_indptr[1:] - qo_indptr[:-1]) * tree_lens,
+        0,
+    )
+    return mask_indptr
+
 
 class BatchPrefillWithPagedKVCacheWrapper:
     r"""Wrapper class for prefill/append attention with paged kv-cache for batch of
@@ -1066,7 +1082,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
             otherwise, the wrapper will use default attention implementation.
         """
         _check_kv_layout(kv_layout)
-
+        #* arguments of jit module, attention variant
         if jit_args is not None:
             self._jit_module = get_batch_prefill_jit_module(
                 jit_args[0],
@@ -1192,6 +1208,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
         q_data_type: Union[str, torch.dtype] = "float16",
         kv_data_type: Optional[Union[str, torch.dtype]] = None,
         non_blocking: bool = True,
+        # tree_lens: Optional[torch.Tensor] = None, #* modify for self-definted attention computation
     ) -> None:
         r"""Plan batch prefill/append attention on Paged KV-Cache for given problem specification.
 
@@ -1297,9 +1314,17 @@ class BatchPrefillWithPagedKVCacheWrapper:
                 paged_kv_last_page_len,
                 page_size,
             )
+
+            #* modify for self-defined attention computation
+            # mask_indptr = _compute_custom_mask_indptr(
+            #     qo_indptr,
+            #     tree_lens,
+            # )
+
         if packed_custom_mask is None and custom_mask is not None:
             # create packed custom mask from custom mask
             print("\033[94m#Review: pack custom mask into bits\033[0m")
+            #* pack custom_mask and recompute mask_indptr
             packed_custom_mask, mask_indptr = segment_packbits(
                 custom_mask.contiguous().view(-1),
                 mask_indptr,
@@ -1388,14 +1413,16 @@ class BatchPrefillWithPagedKVCacheWrapper:
                 self._mask_indptr_buf = mask_indptr.to(
                     self.device, non_blocking=non_blocking
                 )
+            #* modify for self-defined attention computation
+            # self._tree_lens_buf = tree_lens.to(self.device, non_blocking=non_blocking)
 
         self._cached_q_data_type = q_data_type
         self._cached_kv_data_type = kv_data_type
-        #* use JIT module
+        #* having jit_args in constructor
         if self._jit_module is not None:
             print("\033[94m#Review prefill.py: jit module\033[0m")
             self._cached_module = self._jit_module
-        else:
+        else: #* no jit_args in constructor
             if self._backend == "auto":
                 self._backend = determine_attention_backend(
                     self.device,
@@ -1405,7 +1432,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
                     q_data_type,
                     kv_data_type,
                 )
-
+            #* module args
             get_module_args = (
                 q_data_type,
                 kv_data_type,
@@ -1645,7 +1672,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
         else:
             sparse_indices = self._paged_kv_indices_buf
             sparse_indptr = self._paged_kv_indptr_buf
-
+        #* fixed paramters of BatchPrefillWithPagedKVCacheRun()
         run_args = [
             self._float_workspace_buffer,
             self._int_workspace_buffer,
@@ -1662,11 +1689,15 @@ class BatchPrefillWithPagedKVCacheWrapper:
             mask_mode,
             TensorLayout[self._kv_layout].value,
             window_left,
+            # self._tree_lens_buf, #* modify for self-defined attention computation
         ]
 
+        #* ADDITIONAL_FUNC_PARAMS
+        # when using jit
         if self._jit_module is not None:
-            run_args.extend(list(args))
+            run_args.extend(list(args)) # additional args in run() which correspond to jit_args in init()
         else:
+            # not jit, we can get _cached_module without _jit_module
             run_args += [
                 self._custom_mask_buf,
                 self._mask_indptr_buf,
@@ -1676,7 +1707,8 @@ class BatchPrefillWithPagedKVCacheWrapper:
                 rope_scale,
                 rope_theta,
             ]
-        # print(f"arguments of paged_run: {run_args}")
+        print(f"#Review: _jit_module = {(self._jit_module is not None)}, additional args = {len(run_args) - 15}")
+        print(f"total number of arguments in paged_run: {len(run_args)}")
         #TODO: run with JIT module
         self._cached_module.paged_run(*run_args)
         if v_scale is not None:

@@ -58,7 +58,7 @@ struct DefaultAttention : AttentionVariantBase {
     }
     if constexpr (use_custom_mask) {
       if constexpr (has_maybe_mask_indptr_v<Params>) {
-        custom_mask_ptr = params.maybe_custom_mask + params.maybe_mask_indptr[batch_idx]; // mask of batch
+        custom_mask_ptr = params.maybe_custom_mask + params.maybe_mask_indptr[batch_idx]; // mask ptr of batch_idx
       } else {
         custom_mask_ptr = params.maybe_custom_mask;
       }

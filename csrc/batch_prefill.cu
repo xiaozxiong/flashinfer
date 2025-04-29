@@ -295,6 +295,8 @@ void BatchPrefillWithPagedKVCacheRun(at::Tensor float_workspace_buffer,
         params.max_total_num_rows = 0;
         params.padded_batch_size = 0;
         params.partition_kv = false;
+        //* modify for self-defined attention computation
+        // params.tree_lens = static_cast<uint32_t*>(tree_lens->data_ptr())
         
         ADDITIONAL_PARAMS_SETTER
         // assignment of params.maybe_custom_mask and other params
